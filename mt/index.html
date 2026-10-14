@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Sauce Snake AR</title>
+    <!-- Librerías de A-Frame y AR.js -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.7/aframe/build/aframe-ar.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@800&display=swap');
+        
+        body { margin: 0; overflow: hidden; font-family: 'Montserrat', sans-serif; }
+        
+        :root {
+            --magenta: #FF00FF;
+            --cyan: #00FFFF;
+            --verde: #39FF14;
+            --oscuro: rgba(15, 10, 25, 0.9);
+        }
+
+        #ui-panel {
+            position: fixed; top: 10px; left: 10px; right: 10px;
+            background: var(--oscuro); color: white;
+            padding: 15px; border-radius: 15px;
+            display: flex; justify-content: space-around;
+            border: 2px solid var(--verde);
+            box-shadow: 0 0 15px var(--verde);
+            z-index: 10;
+        }
+
+        .stat { text-align: center; }
+        .stat span { display: block; font-size: 24px; color: var(--cyan); text-shadow: 0 0 8px var(--cyan); }
+        .stat-label { font-size: 10px; color: #aaa; text-transform: uppercase; }
+
+        #overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 5, 20, 0.95); z-index: 20;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; text-align: center;
+        }
+
+        h1 { font-size: 45px; color: var(--magenta); text-shadow: 0 0 20px var(--magenta); margin-bottom: 5px; }
+        p { font-size: 16px; color: #ccc; max-width: 80%; }
+
+        button {
+            margin-top: 20px; padding: 15px 40px; font-size: 20px; font-weight: bold;
+            background: linear-gradient(45deg, var(--magenta), var(--cyan));
+            color: white; border: none; border-radius: 30px; cursor: pointer;
+            box-shadow: 0 0 20px var(--cyan); text-transform: uppercase;
+        }
+        button:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+
+    <!-- Interfaz UI -->
+    <div id="ui-panel">
+        <div class="stat"><div class="stat-label">Puntos</div><span id="puntos-txt">0</span></div>
+        <div class="stat"><div class="stat-label">Tiempo</div><span id="tiempo-txt" style="color: var(--magenta);">60</span></div>
+        <div class="stat"><div class="stat-label">Récord</div><span id="record-txt">0</span></div>
+    </div>
+
+    <!-- Pantalla de Inicio / Fin -->
+    <div id="overlay">
+        <h1 id="titulo">SAUCE SNAKE AR</h1>
+        <p id="mensaje">Toca las manzanas de neón para que la serpiente se mueva y crezca. Evita los cubos rojos.</p>
+        <button id="btn-iniciar">Jugar</button>
+    </div>
+
+    <!-- Escena AR -->
+    <a-scene embedded vr-mode-ui="enabled: false" arjs="sourceType: webcam; debugUIEnabled: false;" renderer="logarithmicDepthBuffer: true;">
+        <a-marker preset="hiro" id="marcador">
+            
+            <!-- Piso de referencia (Opcional, para ver los límites) -->
+            <a-plane position="0 0 0" rotation="-90 0 0" width="4" height="4" material="color: #111; opacity: 0.5; transparent: true"></a-plane>
+
+            <!-- Cabeza de la Serpiente -->
+            <a-box id="snake-head" position="0 0.25 0" width="0.4" height="0.4" depth="0.4" color="#39FF14" shadow></a-box>
+            
+            <!-- Contenedor del cuerpo (cola) y la comida -->
+            <a-entity id="snake-body"></a-entity>
+            <a-entity id="comida-container"></a-entity>
+            <a-entity id="enemigos-container"></a-entity>
+
+        </a-marker>
+
+        <!-- Cámara -->
+        <a-entity camera>
+            <a-cursor raycaster="objects: .clicable" fuse="false" color="#FF00FF" animation__click="property: scale; startEvents: click; easing: easeInCubic; dur: 150; from: 0.1 0.1 0.1; to: 1 1 1"></a-cursor>
+        </a-entity>
+    </a-scene>
+
+    <script>
+        // Variables
+        let puntos = 0;
+        let tiempo = 60;
+        let jugando = false;
+        let temporizador;
+        let partesCuerpo = [];
+        let cabezaPos = { x: 0, y: 0.25, z: 0 };
+        
+        // UI
+        const txtPuntos = document.getElementById("puntos-txt");
+        const txtTiempo = document.getElementById("tiempo-txt");
+        const txtRecord = document.getElementById("record-txt");
+        const overlay = document.getElementById("overlay");
+        const titulo = document.getElementById("titulo");
+        const mensaje = document.getElementById("mensaje");
+        const btnIniciar = document.getElementById("btn-iniciar");
+        
+        const snakeHead = document.getElementById("snake-head");
+        const bodyContainer = document.getElementById("snake-body");
+        const comidaContainer = document.getElementById("comida-container");
+        const enemigosContainer = document.getElementById("enemigos-container");
+
+        // Récord
+        let record = localStorage.getItem("sauceSnakeRecord") || 0;
+        txtRecord.innerText = record;
+
+        // Audio Sintetizado
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playSound(tipo) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            
+            if (tipo === 'comer') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            } else {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.3);
+                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            }
+            osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+        }
+
+        // Generar Manzana
+        function generarComida() {
+            comidaContainer.innerHTML = "";
+            const x = (Math.random() - 0.5) * 3;
+            const z = (Math.random() - 0.5) * 3;
+            
+            const manzana = document.createElement("a-sphere");
+            manzana.setAttribute("position", `${x} 0.25 ${z}`);
+            manzana.setAttribute("radius", "0.2");
+            manzana.setAttribute("color", "#00FFFF");
+            manzana.classList.add("clicable");
+            
+            // Animación de flotar
+            manzana.setAttribute("animation", "property: position; to: `${x} 0.4 ${z}`; dir: alternate; loop: true; dur: 800");
+
+            manzana.addEventListener("click", () => {
+                if (!jugando) return;
+                
+                // Mover serpiente hacia la comida
+                moverSerpiente(x, z);
+                
+                // Comer
+                playSound('comer');
+                puntos += 10;
+                txtPuntos.innerText = puntos;
+                
+                // Crecer
+                crecerSerpiente();
+                
+                // Nueva comida y posibles enemigos
+                generarComida();
+                if (puntos % 30 === 0) generarEnemigo(); // Cada 30 pts un enemigo nuevo
+            });
+            comidaContainer.appendChild(manzana);
+        }
+
+        // Generar Obstáculo (Virus)
+        function generarEnemigo() {
+            const x = (Math.random() - 0.5) * 3;
+            const z = (Math.random() - 0.5) * 3;
+            
+            const enemigo = document.createElement("a-box");
+            enemigo.setAttribute("position", `${x} 0.25 ${z}`);
+            enemigo.setAttribute("width", "0.3"); enemigo.setAttribute("height", "0.3"); enemigo.setAttribute("depth", "0.3");
+            enemigo.setAttribute("color", "#FF0000");
+            enemigo.classList.add("clicable");
+            enemigo.setAttribute("animation", "property: rotation; to: 360 360 0; loop: true; dur: 2000");
+
+            enemigo.addEventListener("click", () => {
+                if (!jugando) return;
+                playSound('error');
+                perderJuego("¡Tocaste un virus tóxico!");
+            });
+            enemigosContainer.appendChild(enemigo);
+        }
+
+        function moverSerpiente(nx, nz) {
+            // Guardar posiciones anteriores para el cuerpo
+            let prevX = cabezaPos.x;
+            let prevZ = cabezaPos.z;
+
+            // Animar cabeza
+            snakeHead.setAttribute("animation__move", `property: position; to: ${nx} 0.25 ${nz}; dur: 300; easing: linear`);
+            cabezaPos = { x: nx, y: 0.25, z: nz };
+
+            // Mover el resto del cuerpo
+            partesCuerpo.forEach((parte, index) => {
+                const tempX = parte.getAttribute("position").x;
+                const tempZ = parte.getAttribute("position").z;
+                
+                parte.setAttribute("animation__move", `property: position; to: ${prevX} 0.25 ${prevZ}; dur: 300; easing: linear`);
+                
+                prevX = tempX;
+                prevZ = tempZ;
+            });
+        }
+
+        function crecerSerpiente() {
+            const segmento = document.createElement("a-box");
+            // Aparece en la última posición conocida
+            let spawnX = partesCuerpo.length === 0 ? cabezaPos.x : partesCuerpo[partesCuerpo.length - 1].getAttribute("position").x;
+            let spawnZ = partesCuerpo.length === 0 ? cabezaPos.z : partesCuerpo[partesCuerpo.length - 1].getAttribute("position").z;
+            
+            segmento.setAttribute("position", `${spawnX} 0.25 ${spawnZ}`);
+            segmento.setAttribute("width", "0.3"); segmento.setAttribute("height", "0.3"); segmento.setAttribute("depth", "0.3");
+            segmento.setAttribute("color", "#FF00FF");
+            
+            bodyContainer.appendChild(segmento);
+            partesCuerpo.push(segmento);
+        }
+
+        function iniciarJuego() {
+            overlay.style.display = "none";
+            jugando = true;
+            puntos = 0; tiempo = 60;
+            partesCuerpo = [];
+            cabezaPos = { x: 0, y: 0.25, z: 0 };
+            
+            txtPuntos.innerText = puntos;
+            txtTiempo.innerText = tiempo;
+            bodyContainer.innerHTML = "";
+            enemigosContainer.innerHTML = "";
+            snakeHead.setAttribute("position", "0 0.25 0");
+
+            generarComida();
+
+            clearInterval(temporizador);
+            temporizador = setInterval(() => {
+                tiempo--;
+                txtTiempo.innerText = tiempo;
+                if (tiempo <= 0) perderJuego("¡Se acabó el tiempo!");
+            }, 1000);
+        }
+
+        function perderJuego(razon) {
+            jugando = false;
+            clearInterval(temporizador);
+            comidaContainer.innerHTML = "";
+            
+            if (puntos > record) {
+                record = puntos;
+                localStorage.setItem("sauceSnakeRecord", record);
+                txtRecord.innerText = record;
+            }
+
+            titulo.innerText = "FIN DEL JUEGO";
+            titulo.style.color = "red";
+            mensaje.innerText = `${razon} Lograste ${puntos} puntos.`;
+            btnIniciar.innerText = "REINTENTAR";
+            overlay.style.display = "flex";
+        }
+
+        btnIniciar.addEventListener("click", iniciarJuego);
+    </script>
+</body>
+</html>
